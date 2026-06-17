@@ -1,0 +1,80 @@
+# Contributing to Perihelion
+
+Thanks for your interest in contributing! Perihelion is built in public and
+designed to be **Wave-native** — the codebase is organized around clear,
+scopeable issues that contributors at every level can meaningfully tackle.
+
+This file is the quick-start. The full contributor playbook — issue taxonomy by
+skill and Wave cycle, PR review process, and the path from first-time
+contributor to maintainer — lives in
+[`docs/CONTRIBUTING.md`](./docs/CONTRIBUTING.md) and
+[the architecture spec, §9](./docs/TECHNICAL-ARCHITECTURE.md#9-contribution-guide-for-drips-wave).
+
+## Code of Conduct
+
+By participating, you agree to abide by our
+[Code of Conduct](./CODE_OF_CONDUCT.md).
+
+## Ways to contribute
+
+| Track            | Components                       | Example work                                       |
+| ---------------- | -------------------------------- | -------------------------------------------------- |
+| Rust / Soroban   | `contracts/soroban/`             | Settlement logic, oracle integration, invariants   |
+| Solidity         | `contracts/evm/`                 | Escrow flows, LayerZero wiring, gas review         |
+| TypeScript       | `sdk/`, `solver/`, `relayer/`    | SDK ergonomics, solver routing, relayer reliability |
+| Documentation    | `docs/`, package READMEs         | Integration guides, architecture explainers        |
+
+## Development setup
+
+```bash
+# TypeScript workspaces (sdk, solver, relayer)
+npm install
+npm run build
+npm test
+
+# Soroban contracts
+( cd contracts/soroban && cargo test )
+
+# EVM contracts
+( cd contracts/evm && forge install foundry-rs/forge-std && forge test )
+```
+
+## Workflow
+
+1. **Find or open an issue.** Comment to claim it so we avoid duplicate work.
+2. **Branch** from `main` using a descriptive name, e.g.
+   `feat/soroban-fill-intent` or `fix/escrow-refund-race`.
+3. **Implement with tests.** Every behavior change ships with tests in the
+   relevant suite (`node:test`, `cargo test`, or Foundry).
+4. **Keep docs in sync.** If you change an interface or on-chain format, update
+   the spec in the same PR.
+5. **Open a PR** referencing the issue and filling out the PR template.
+
+## Commit & PR conventions
+
+- Write clear, imperative commit subjects (`Add cancel_expired_intent`, not
+  `added stuff`). [Conventional Commits](https://www.conventionalcommits.org)
+  prefixes (`feat:`, `fix:`, `docs:`, `chore:`, `test:`) are encouraged.
+- Keep PRs focused — one logical change per PR is easier to review and merge.
+- Ensure CI is green: `npm test`, `cargo test`, `forge test`, and lints.
+- **Invariants first.** Reviewers check every contract PR against the protocol's
+  [design invariants](./docs/TECHNICAL-ARCHITECTURE.md#0-design-invariants-read-first);
+  a change that could violate I1–I5 is blocked regardless of test status.
+
+## Merge criteria
+
+- All CI checks pass.
+- Required approvals (≥1 for small docs/config; ≥2 for contract logic, one from
+  the relevant chain track).
+- No unresolved review threads.
+- For `contracts/` changes: a note on resource/fee impact and whether an audit
+  gate applies before mainnet.
+
+## Reporting bugs & security issues
+
+- **Non-security bugs:** open an issue using the Bug Report template.
+- **Security vulnerabilities:** do **not** open a public issue — follow
+  [`SECURITY.md`](./SECURITY.md).
+
+Thank you for helping build the shortest path between Stellar and every other
+chain. 🌌

@@ -1,0 +1,11 @@
+# Normalize line endings to LF across the repo.
+* text=auto eol=lf
+
+# Treat these as binary (no diff/merge munging).
+*.wasm binary
+*.png binary
+*.jpg binary
+
+# Generated / vendored files collapse in diffs and exclude from language stats.
+package-lock.json linguist-generated=true
+docs/** linguist-documentation=true

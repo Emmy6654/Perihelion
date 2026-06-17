@@ -1,0 +1,24 @@
+# Code owners for Perihelion Protocol
+# These owners are requested for review automatically when matching files change.
+# Replace the placeholder team/handles with real maintainers as the org grows.
+
+# Default: org maintainers own everything not otherwise specified.
+*                       @Perihelion-Protocol/maintainers
+
+# Soroban (Rust) contracts
+/contracts/soroban/     @Perihelion-Protocol/soroban-maintainers
+
+# EVM (Solidity) contracts
+/contracts/evm/         @Perihelion-Protocol/evm-maintainers
+
+# TypeScript packages
+/sdk/                   @Perihelion-Protocol/ts-maintainers
+/solver/                @Perihelion-Protocol/ts-maintainers
+/relayer/               @Perihelion-Protocol/ts-maintainers
+
+# Documentation & specifications
+/docs/                  @Perihelion-Protocol/maintainers
+
+# Security-sensitive meta files
+/SECURITY.md            @Perihelion-Protocol/maintainers
+/.github/               @Perihelion-Protocol/maintainers

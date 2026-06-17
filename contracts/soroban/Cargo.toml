@@ -6,10 +6,10 @@ members = ["settlement"]
 version = "0.0.1"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/perihelion-protocol/perihelion"
+repository = "https://github.com/Perihelion-Protocol/perihelion"
 
 [workspace.dependencies]
-soroban-sdk = "21.7.6"
+soroban-sdk = "22"
 
 [profile.release]
 opt-level = "z"

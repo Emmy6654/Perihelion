@@ -4,7 +4,7 @@ pragma solidity ^0.8.24;
 import { Test } from "forge-std/Test.sol";
 import { PerihelionEscrow } from "../src/PerihelionEscrow.sol";
 import { IERC20 } from "../src/IERC20.sol";
-import { Origin, MessagingParams, ILayerZeroEndpoint } from "../src/interfaces/ILayerZero.sol";
+import { Origin, MessagingParams, MessagingFee, ILayerZeroEndpoint } from "../src/interfaces/ILayerZero.sol";
 
 /// @dev Minimal mintable ERC-20 for tests.
 contract MockERC20 is IERC20 {
@@ -73,8 +73,10 @@ contract FeeERC20 is IERC20 {
     }
 }
 
-/// @dev USDT-style token: no return value (old USDC behavior). Tests escrow robustness.
-contract NoReturnERC20 is IERC20 {
+/// @dev USDT-style token: no return value on transfer/transferFrom (old USDC behavior).
+///      Does not inherit IERC20 to allow the void return type; the escrow
+///      exercises it via low-level calls in _safeTransfer / _safeTransferFrom.
+contract NoReturnERC20 {
     mapping(address => uint256) public balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
 
@@ -131,6 +133,11 @@ contract MockEndpoint is ILayerZeroEndpoint {
     address public lastRefundAddress;
     uint256 public sendCount;
 
+    /// @dev Fee returned by quote(); 0 means any msg.value >= 0 passes.
+    uint256 public mockFee;
+
+    function setMockFee(uint256 fee) external { mockFee = fee; }
+
     function send(MessagingParams calldata params, address refundAddress)
         external
         payable
@@ -143,6 +150,14 @@ contract MockEndpoint is ILayerZeroEndpoint {
         lastRefundAddress = refundAddress;
         sendCount++;
         return bytes32(uint256(0xABCD));
+    }
+
+    function quote(MessagingParams calldata, address)
+        external
+        view
+        returns (MessagingFee memory)
+    {
+        return MessagingFee({ nativeFee: mockFee, lzTokenFee: 0 });
     }
 
     function deliver(
@@ -187,7 +202,7 @@ contract PerihelionEscrowTest is Test {
         uint256 amount
     );
     event Released(bytes32 indexed intentHash, address indexed solver, uint256 amount);
-    event Refunded(bytes32 indexed intentHash, address indexed user, uint256 amount);
+    event Refunded(bytes32 indexed intentHash, address indexed user, uint256 amount, uint8 reason);
     event PausedSet(bool paused);
     event OwnershipTransferStarted(address indexed previousOwner, address indexed newOwner);
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
@@ -433,7 +448,7 @@ contract PerihelionEscrowTest is Test {
         bytes32 h = _lock();
 
         vm.expectEmit(true, true, false, true);
-        emit Refunded(h, user, 100_000);
+        emit Refunded(h, user, 100_000, 0);
         _cancel(h, 1);
 
         assertEq(token.balanceOf(user), 1_000_000);
@@ -514,7 +529,7 @@ contract PerihelionEscrowTest is Test {
 
         vm.warp(intent.deadline + escrow.confirmationGrace());
         vm.expectEmit(true, true, false, true);
-        emit Refunded(h, user, 100_000);
+        emit Refunded(h, user, 100_000, 0);
         escrow.cancelExpired(h);
 
         assertEq(token.balanceOf(user), 1_000_000);
@@ -1000,6 +1015,94 @@ contract PerihelionEscrowTest is Test {
         bytes memory sig = _sign(intent);
 
         vm.prank(preferredSolver);
+        escrow.lock{ value: 0.01 ether }(intent, sig);
+        assertEq(token.balanceOf(address(escrow)), 100_000);
+    }
+
+    // --- #39: WrongChain check -------------------------------------------
+
+    function test_RevertWhen_LockWrongChain() public {
+        PerihelionEscrow.Intent memory intent = _intent();
+        intent.sourceChainId = block.chainid + 1; // mismatch
+        bytes memory sig = _sign(intent);
+
+        vm.prank(solver);
+        vm.expectRevert(PerihelionEscrow.WrongChain.selector);
+        escrow.lock{ value: 0.01 ether }(intent, sig);
+    }
+
+    function test_LockCorrectChain() public {
+        // Ensure the default _intent() (uses block.chainid) still works.
+        _lock();
+        assertEq(token.balanceOf(address(escrow)), 100_000);
+    }
+
+    // --- #40: MIN_CONFIRMATION_GRACE ----------------------------------------
+
+    function test_RevertWhen_GraceBelowMinimum() public {
+        uint256 tooShort = escrow.MIN_CONFIRMATION_GRACE() - 1;
+        vm.expectRevert(PerihelionEscrow.GraceTooShort.selector);
+        escrow.setConfirmationGrace(tooShort);
+    }
+
+    function test_SetConfirmationGraceAtMinimum() public {
+        escrow.setConfirmationGrace(escrow.MIN_CONFIRMATION_GRACE());
+        assertEq(escrow.confirmationGrace(), escrow.MIN_CONFIRMATION_GRACE());
+    }
+
+    function test_RevertWhen_GraceAboveMaximum() public {
+        uint256 tooLong = escrow.MAX_CONFIRMATION_GRACE() + 1;
+        vm.expectRevert(PerihelionEscrow.GraceTooLong.selector);
+        escrow.setConfirmationGrace(tooLong);
+    }
+
+    // --- #37: CancelIntent reason decoding ----------------------------------
+
+    function test_CancelIntentSurfacesReason() public {
+        bytes32 h = _lock();
+        // reason = 0x01 (ADMIN)
+        bytes memory msg_ = abi.encodePacked(bytes1(0x01), bytes1(0x03), h, uint8(0x01));
+
+        vm.expectEmit(true, true, false, true);
+        emit Refunded(h, user, 100_000, 0x01);
+        endpoint.deliver(escrow, STELLAR_EID, STELLAR_PEER, 1, msg_);
+    }
+
+    function test_RevertWhen_CancelIntentUnknownReason() public {
+        bytes32 h = _lock();
+        bytes memory msg_ = abi.encodePacked(bytes1(0x01), bytes1(0x03), h, uint8(0x99));
+        vm.expectRevert(PerihelionEscrow.MalformedPayload.selector);
+        endpoint.deliver(escrow, STELLAR_EID, STELLAR_PEER, 1, msg_);
+    }
+
+    function test_CancelExpiredEmitsExpiredReason() public {
+        bytes32 h = _lock();
+        PerihelionEscrow.Intent memory intent = _intent();
+        vm.warp(intent.deadline + escrow.confirmationGrace());
+
+        vm.expectEmit(true, true, false, true);
+        emit Refunded(h, user, 100_000, 0x00); // CANCEL_REASON_EXPIRED
+        escrow.cancelExpired(h);
+    }
+
+    // --- #38: Fee quote and underpayment ------------------------------------
+
+    function test_RevertWhen_LockFeeTooLow() public {
+        endpoint.setMockFee(0.05 ether);
+        PerihelionEscrow.Intent memory intent = _intent();
+        bytes memory sig = _sign(intent);
+
+        vm.prank(solver);
+        vm.expectRevert(PerihelionEscrow.FeeTooLow.selector);
+        escrow.lock{ value: 0.01 ether }(intent, sig); // below the 0.05 ether quote
+    }
+
+    function test_LockExactFeeSucceeds() public {
+        endpoint.setMockFee(0.01 ether);
+        PerihelionEscrow.Intent memory intent = _intent();
+        bytes memory sig = _sign(intent);
+
+        vm.prank(solver);
         escrow.lock{ value: 0.01 ether }(intent, sig);
         assertEq(token.balanceOf(address(escrow)), 100_000);
     }

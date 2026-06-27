@@ -48,12 +48,34 @@ contract PerihelionEscrow is ILayerZeroReceiver {
 
     // --- Constants -----------------------------------------------------------
 
-    bytes32 private constant EIP712_DOMAIN_TYPEHASH =
-        keccak256("EIP712Domain(string name,string version)");
+    bytes32 private constant EIP712_DOMAIN_TYPEHASH = keccak256(
+        "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
+    );
+
+    /// @dev Half the secp256k1 curve order. Signatures with s above this are malleable
+    ///      (for any (r,s,v) a second (r, n-s, v') recovers the same signer). Rejecting
+    ///      high-s follows EIP-2 and matches OpenZeppelin ECDSA. On-chain safety is not
+    ///      affected (the intentHash does not commit to the signature), but enforcing
+    ///      low-s prevents off-chain deduplicators from being confused by two distinct
+    ///      signatures for the same intent.
+    uint256 private constant SECP256K1_HALF_ORDER =
+        0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0;
 
     bytes32 private constant INTENT_TYPEHASH = keccak256(
         "Intent(address user,string destination,uint256 sourceChainId,address sourceAsset,uint256 sourceAmount,string destAsset,uint256 minDestAmount,uint256 deadline,uint256 nonce,address preferredSolver)"
     );
+
+    // --- Cancel reason codes (shared taxonomy with the Soroban side) --------
+
+    /// @dev Cross-chain cancel: intent deadline elapsed on Stellar.
+    uint8 private constant CANCEL_REASON_EXPIRED       = 0x00;
+    /// @dev Cross-chain cancel: admin-initiated refund.
+    uint8 private constant CANCEL_REASON_ADMIN         = 0x01;
+    /// @dev Cross-chain cancel: fill was deemed invalid.
+    uint8 private constant CANCEL_REASON_INVALID       = 0x02;
+    /// @dev Local refund fallback: timed out waiting for cross-chain confirmation.
+    ///      This value (0xFF) is EVM-only; it does not appear in Soroban messages.
+    uint8 private constant CANCEL_REASON_LOCAL_TIMEOUT = 0xFF;
 
     bytes1 private constant PROTOCOL_VERSION = 0x01;
     bytes1 private constant MSG_FILL_INSTRUCTION = 0x01;
@@ -77,7 +99,8 @@ contract PerihelionEscrow is ILayerZeroReceiver {
 
     // --- Immutable / config --------------------------------------------------
 
-    /// @notice EIP-712 domain separator (name="Perihelion", version="1").
+    /// @notice EIP-712 domain separator — binds signatures to this contract and chain.
+    ///         Domain: name="Perihelion", version="1", chainId=<deployment chain>, verifyingContract=<this>.
     bytes32 public immutable DOMAIN_SEPARATOR;
     /// @notice Trusted LayerZero endpoint.
     ILayerZeroEndpoint public immutable endpoint;
@@ -155,6 +178,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     error GraceTooShort();
     error FeeTooLow();
     error ZeroAddress();
+    error SourceChainMismatch();
 
     // --- Modifiers -----------------------------------------------------------
 
@@ -185,7 +209,11 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         emit OwnershipTransferred(address(0), msg.sender);
         DOMAIN_SEPARATOR = keccak256(
             abi.encode(
-                EIP712_DOMAIN_TYPEHASH, keccak256(bytes("Perihelion")), keccak256(bytes("1"))
+                EIP712_DOMAIN_TYPEHASH,
+                keccak256(bytes("Perihelion")),
+                keccak256(bytes("1")),
+                block.chainid,
+                address(this)
             )
         );
     }
@@ -341,6 +369,15 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         }
     }
 
+    /// @dev Release destination is `solverEvm` from the Stellar FillConfirmed message,
+    ///      NOT `l.solver` (the address that called `lock` on the source chain). This is
+    ///      intentional: solvers may operate a hot locking key on EVM and a separate cold
+    ///      payout address, supplying the payout address as `solver_evm` in `fill_intent`
+    ///      on Stellar. The two addresses can legitimately differ. Solver tooling MUST
+    ///      surface both addresses explicitly so operators understand which key receives
+    ///      the payout. The on-chain check that prevents theft is the LayerZero peer
+    ///      authentication in `lzReceive` — only the trusted Stellar peer can supply
+    ///      `solverEvm`, so an attacker cannot redirect funds to an arbitrary address.
     function _onFillConfirmed(bytes calldata message) internal {
         (bytes32 intentHash, address solverEvm) = _decodeFillConfirmed(message);
         Lock storage l = locks[intentHash];
@@ -501,7 +538,11 @@ contract PerihelionEscrow is ILayerZeroReceiver {
             s := calldataload(add(signature.offset, 32))
             v := byte(0, calldataload(add(signature.offset, 64)))
         }
+        // Normalise compact (0/1) → EVM (27/28); reject anything else.
         if (v < 27) v += 27;
+        if (v != 27 && v != 28) return false;
+        // Reject high-s (malleable) signatures. See SECP256K1_HALF_ORDER comment.
+        if (uint256(s) > SECP256K1_HALF_ORDER) return false;
         address recovered = ecrecover(digest, v, r, s);
         return recovered != address(0) && recovered == signer;
     }

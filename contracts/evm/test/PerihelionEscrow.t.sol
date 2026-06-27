@@ -84,19 +84,22 @@ contract NoReturnERC20 {
         balanceOf[to] += amount;
     }
 
-    function approve(address spender, uint256 amount) external {
+    function approve(address spender, uint256 amount) external returns (bool) {
         allowance[msg.sender][spender] = amount;
+        return true;
     }
 
-    function transfer(address to, uint256 amount) external {
+    function transfer(address to, uint256 amount) external returns (bool) {
         balanceOf[msg.sender] -= amount;
         balanceOf[to] += amount;
+        assembly { return(0, 0) } // no return data, mimicking USDT
     }
 
-    function transferFrom(address from, address to, uint256 amount) external {
+    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
         allowance[from][msg.sender] -= amount;
         balanceOf[from] -= amount;
         balanceOf[to] += amount;
+        assembly { return(0, 0) } // no return data, mimicking USDT
     }
 }
 
@@ -1009,7 +1012,7 @@ contract PerihelionEscrowTest is Test {
     function test_PreferredSolverCanLock() public {
         address preferredSolver = address(0x1234);
         vm.deal(preferredSolver, 10 ether);
-        
+
         PerihelionEscrow.Intent memory intent = _intent();
         intent.preferredSolver = preferredSolver;
         bytes memory sig = _sign(intent);

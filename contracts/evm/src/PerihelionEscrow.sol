@@ -140,8 +140,17 @@ contract PerihelionEscrow is ILayerZeroReceiver {
 
     /// @notice intentHash => escrow position.
     mapping(bytes32 => Lock) public locks;
-    /// @notice Lazy-nonce high-water mark per source endpoint id.
+    /// @notice Highest consumed nonce per source endpoint id. Used as a quick
+    ///         filtration — nonces at or below this are not necessarily consumed
+    ///         (out-of-order delivery may leave gaps), so the bitmap is the
+    ///         authoritative source. Off-chain monitors and the admin view should
+    ///         treat this as the low-water mark, not the exact set of consumed
+    ///         nonces.
     mapping(uint32 => uint64) public inboundNonce;
+    /// @notice Bitmap-based nonce tracking for unordered delivery (LayerZero
+    ///         lazy-nonce model). Each bit represents whether a specific nonce
+    ///         has been consumed: word index = nonce / 256, bit index = nonce % 256.
+    mapping(uint32 => mapping(uint256 => uint256)) private _inboundNonceBitmap;
 
     uint256 private _reentrancy;
 
@@ -390,8 +399,13 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     ) external payable nonReentrant {
         if (msg.sender != address(endpoint)) revert NotEndpoint();
         if (origin.sender != stellarPeer) revert UntrustedPeer();
-        if (origin.nonce <= inboundNonce[origin.srcEid]) revert StaleNonce();
-        inboundNonce[origin.srcEid] = origin.nonce;
+        // Bitmap-based nonce tracking supports unordered delivery (LayerZero
+        // lazy-nonce model). A nonce is accepted exactly once regardless of
+        // delivery order. The high-water mark is updated opportunistically.
+        if (origin.nonce == 0 || _isNonceConsumed(origin.srcEid, origin.nonce)) {
+            revert StaleNonce();
+        }
+        _consumeNonce(origin.srcEid, origin.nonce);
 
         if (message.length < 2 || message[0] != PROTOCOL_VERSION) revert MalformedPayload();
         bytes1 msgType = message[1];
@@ -555,6 +569,27 @@ contract PerihelionEscrow is ILayerZeroReceiver {
             reason != CANCEL_REASON_ADMIN &&
             reason != CANCEL_REASON_INVALID
         ) revert MalformedPayload();
+    }
+
+    // --- Internal: nonce bitmap ----------------------------------------------
+
+    /// @dev Check whether a nonce has already been consumed for the given source
+    ///      endpoint. Uses a bitmap to allow unordered delivery.
+    function _isNonceConsumed(uint32 srcEid, uint64 nonce) private view returns (bool) {
+        uint256 wordIndex = uint256(nonce / 256);
+        uint256 bitIndex = uint256(nonce % 256);
+        return (_inboundNonceBitmap[srcEid][wordIndex] >> bitIndex) & 1 == 1;
+    }
+
+    /// @dev Mark a nonce as consumed. Updates both the bitmap and the high-water
+    ///      mark (opportunistically, only when nonce advances it).
+    function _consumeNonce(uint32 srcEid, uint64 nonce) private {
+        uint256 wordIndex = uint256(nonce / 256);
+        uint256 bitIndex = uint256(nonce % 256);
+        _inboundNonceBitmap[srcEid][wordIndex] |= (1 << bitIndex);
+        if (nonce > inboundNonce[srcEid]) {
+            inboundNonce[srcEid] = nonce;
+        }
     }
 
     // --- Internal: signature & token safety ----------------------------------

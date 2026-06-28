@@ -1162,4 +1162,49 @@ contract PerihelionEscrowTest is Test {
         vm.expectRevert(PerihelionEscrow.NotOwner.selector);
         escrow.cancelOwnershipTransfer();
     }
+
+    // --- Nonce bitmap: out-of-order delivery --------------------------------
+
+    /// @notice Under LayerZero lazy-nonce model, messages can be delivered out
+    ///         of order. A lower nonce arriving after a higher one must be
+    ///         accepted if not yet consumed. This test verifies that nonce 5,
+    ///         then nonce 3 (out of order), then nonce 5 again (replay) behave
+    ///         correctly.
+    function test_NonceOutOfOrderDelivery() public {
+        bytes32 h = _lock();
+
+        // Deliver nonce 5 first.
+        bytes memory confirm5 = _fillConfirmed(h, solver);
+        endpoint.deliver(escrow, STELLAR_EID, STELLAR_PEER, 5, confirm5);
+        assertEq(token.balanceOf(solver), 100_000);
+
+        // Lock another intent for the next test cycle.
+        token.mint(user, 1_000_000);
+        vm.prank(user);
+        token.approve(address(escrow), type(uint256).max);
+        PerihelionEscrow.Intent memory intent2 = _intent();
+        intent2.nonce = 2;
+        bytes memory sig2 = _sign(intent2);
+        bytes32 h2 = escrow.hashIntent(intent2);
+        vm.prank(solver);
+        escrow.lock{ value: 0.01 ether }(intent2, sig2);
+
+        // Deliver nonce 3 (out of order, after 5) — must succeed.
+        bytes memory cancel3 = _cancelIntent(h2);
+        endpoint.deliver(escrow, STELLAR_EID, STELLAR_PEER, 3, cancel3);
+        (, , , , , , bool refunded) = escrow.locks(h2);
+        assertTrue(refunded);
+
+        // Deliver nonce 5 again (replay) — must be rejected.
+        bytes memory cancel5 = _cancelIntent(h);
+        vm.expectRevert(PerihelionEscrow.StaleNonce.selector);
+        endpoint.deliver(escrow, STELLAR_EID, STELLAR_PEER, 5, cancel5);
+    }
+
+    /// @notice Nonce 0 is always rejected (default value, never legitimate).
+    function test_RevertWhen_NonceZero() public {
+        bytes32 h = _lock();
+        vm.expectRevert(PerihelionEscrow.StaleNonce.selector);
+        endpoint.deliver(escrow, STELLAR_EID, STELLAR_PEER, 0, _fillConfirmed(h, solver));
+    }
 }

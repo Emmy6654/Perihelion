@@ -209,6 +209,7 @@ contract PerihelionEscrowTest is Test {
     event PausedSet(bool paused);
     event OwnershipTransferStarted(address indexed previousOwner, address indexed newOwner);
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+    event OwnershipTransferCancelled(address indexed previousOwner);
     event Skimmed(address indexed token, address indexed to, uint256 amount);
 
     function setUp() public {
@@ -1136,5 +1137,29 @@ contract PerihelionEscrowTest is Test {
         vm.prank(solver);
         vm.expectRevert(PerihelionEscrow.NotOwner.selector);
         escrow.skim(address(token), solver, surplus);
+    }
+
+    // --- CancelOwnershipTransfer -----------------------------------------------
+
+    function test_CancelOwnershipTransfer() public {
+        escrow.transferOwnership(solver);
+        assertEq(escrow.pendingOwner(), solver);
+
+        vm.expectEmit(true, true, false, true);
+        emit OwnershipTransferCancelled(owner);
+        escrow.cancelOwnershipTransfer();
+        assertEq(escrow.pendingOwner(), address(0));
+    }
+
+    function test_RevertWhen_CancelWithoutPending() public {
+        vm.expectRevert(PerihelionEscrow.NotOwner.selector);
+        escrow.cancelOwnershipTransfer();
+    }
+
+    function test_RevertWhen_CancelNotOwner() public {
+        escrow.transferOwnership(solver);
+        vm.prank(solver);
+        vm.expectRevert(PerihelionEscrow.NotOwner.selector);
+        escrow.cancelOwnershipTransfer();
     }
 }

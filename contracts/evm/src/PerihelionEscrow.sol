@@ -162,6 +162,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     event PausedSet(bool paused);
     event OwnershipTransferStarted(address indexed previousOwner, address indexed newOwner);
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+    event OwnershipTransferCancelled(address indexed previousOwner);
     event Skimmed(address indexed token, address indexed to, uint256 amount);
 
     // --- Errors --------------------------------------------------------------
@@ -273,11 +274,21 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     }
 
     /// @notice Begin a two-step ownership handover. `newOwner` must call
-    ///         {acceptOwnership} to take effect; pass `address(0)` to cancel a
-    ///         pending handover.
+    ///         {acceptOwnership} to take effect. To cancel a pending handover
+    ///         with a clear event, use {cancelOwnershipTransfer} instead of
+    ///         passing `address(0)`.
     function transferOwnership(address newOwner) external onlyOwner {
         pendingOwner = newOwner;
         emit OwnershipTransferStarted(owner, newOwner);
+    }
+
+    /// @notice Cancel a pending ownership handover. Emits a distinct cancellation
+    ///         event so off-chain monitors can clearly distinguish a cancellation
+    ///         from a transfer-to-zero. Reverts if no handover is pending.
+    function cancelOwnershipTransfer() external onlyOwner {
+        if (pendingOwner == address(0)) revert NotOwner();
+        pendingOwner = address(0);
+        emit OwnershipTransferCancelled(owner);
     }
 
     /// @notice Complete a pending ownership handover. Callable only by the

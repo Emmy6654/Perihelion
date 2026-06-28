@@ -209,6 +209,7 @@ contract PerihelionEscrowTest is Test {
     event PausedSet(bool paused);
     event OwnershipTransferStarted(address indexed previousOwner, address indexed newOwner);
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+    event Skimmed(address indexed token, address indexed to, uint256 amount);
 
     function setUp() public {
         endpoint = new MockEndpoint();
@@ -1108,5 +1109,32 @@ contract PerihelionEscrowTest is Test {
         vm.prank(solver);
         escrow.lock{ value: 0.01 ether }(intent, sig);
         assertEq(token.balanceOf(address(escrow)), 100_000);
+    }
+
+    // --- Skim surplus recovery -----------------------------------------------
+
+    function test_SkimRecoversSurplus() public {
+        uint256 surplus = 42;
+        token.mint(address(escrow), surplus);
+        assertEq(token.balanceOf(address(escrow)), surplus);
+
+        vm.expectEmit(true, true, false, true);
+        emit Skimmed(address(token), owner, surplus);
+        escrow.skim(address(token), owner, surplus);
+        assertEq(token.balanceOf(owner), surplus);
+        assertEq(token.balanceOf(address(escrow)), 0);
+    }
+
+    function test_RevertWhen_SkimToZeroAddress() public {
+        vm.expectRevert(PerihelionEscrow.ZeroAddress.selector);
+        escrow.skim(address(token), address(0), 100);
+    }
+
+    function test_RevertWhen_SkimNotOwner() public {
+        uint256 surplus = 42;
+        token.mint(address(escrow), surplus);
+        vm.prank(solver);
+        vm.expectRevert(PerihelionEscrow.NotOwner.selector);
+        escrow.skim(address(token), solver, surplus);
     }
 }

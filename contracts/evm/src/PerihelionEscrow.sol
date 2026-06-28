@@ -20,6 +20,18 @@ import {
 /// @dev The EIP-712 domain/type is byte-identical to `@perihelion/sdk` and the
 ///      Soroban side (Invariant I5). Inbound FillConfirmed/CancelIntent use the
 ///      fixed binary layout the Soroban contract emits (architecture spec §3.3).
+///
+///      ## Token compatibility
+///      The measured-delta accounting at lock time handles fee-on-transfer tokens
+///      correctly by recording the exact amount received. However, this contract
+///      is NOT compatible with rebasing tokens (e.g., stETH) or tokens whose
+///      balance changes after deposit (e.g., deflationary supply adjustments).
+///      For such tokens, the balance attributable to a lock can drift between
+///      lock and release, potentially causing a release/refund to fail
+///      (insufficient balance) or succeed by drawing on another lock's fungible
+///      balance. The `skim` function recovers surplus that cannot be attributed
+///      to any active lock (e.g., from a rebase-up). Rebase-down scenarios can
+///      result in stuck funds — operators should gate listed assets accordingly.
 contract PerihelionEscrow is ILayerZeroReceiver {
     // --- Types ---------------------------------------------------------------
 
@@ -40,7 +52,11 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         address solver;
         address user;
         address asset;
-        uint256 amount; // measured-delta amount actually held
+        /// @dev Measured-delta amount received at lock time (fee-on-transfer safe).
+        ///      REBASING TOKENS ARE INCOMPATIBLE: the balance attributable to this
+        ///      lock can drift post-lock due to supply adjustments. See contract
+        ///      level NatSpec for details.
+        uint256 amount;
         uint256 deadline;
         bool released;
         bool refunded;
@@ -91,11 +107,6 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     ///         flight — which would refund the user after the solver has already
     ///         delivered on Stellar, leaving the solver unrepaid.
     uint256 public constant MIN_CONFIRMATION_GRACE = 30 minutes;
-
-    /// @dev Known cancel reason codes, mirroring the Soroban side.
-    uint8 private constant CANCEL_REASON_EXPIRED = 0x00;
-    uint8 private constant CANCEL_REASON_ADMIN   = 0x01;
-    uint8 private constant CANCEL_REASON_INVALID = 0x02;
 
     // --- Immutable / config --------------------------------------------------
 
@@ -151,6 +162,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     event PausedSet(bool paused);
     event OwnershipTransferStarted(address indexed previousOwner, address indexed newOwner);
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+    event Skimmed(address indexed token, address indexed to, uint256 amount);
 
     // --- Errors --------------------------------------------------------------
 
@@ -179,6 +191,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     error FeeTooLow();
     error ZeroAddress();
     error SourceChainMismatch();
+    error InsufficientBalance();
 
     // --- Modifiers -----------------------------------------------------------
 
@@ -275,6 +288,17 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         owner = pendingOwner;
         pendingOwner = address(0);
         emit OwnershipTransferred(previous, owner);
+    }
+
+    /// @notice Recover surplus tokens accidentally held by the contract (e.g., from
+    ///         rebasing tokens that increased in value, or direct transfers). This
+    ///         contract is NOT compatible with rebasing/deflationary tokens; this
+    ///         function is provided only to recover surplus that cannot be attributed
+    ///         to any active lock. Owner-only.
+    function skim(address token, address to, uint256 amount) external onlyOwner {
+        if (to == address(0)) revert ZeroAddress();
+        _safeTransfer(token, to, amount);
+        emit Skimmed(token, to, amount);
     }
 
     // --- Lock ----------------------------------------------------------------

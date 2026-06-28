@@ -126,6 +126,70 @@ contract FalseReturningERC20 is IERC20 {
     }
 }
 
+/// @dev RevertOnZeroERC20: reverts on transfer/transferFrom when amount == 0,
+///      mimicking tokens that reject zero-value transfers (e.g., some USDT-like
+///      implementations on certain networks).
+contract RevertOnZeroERC20 is IERC20 {
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+
+    function mint(address to, uint256 amount) external {
+        balanceOf[to] += amount;
+    }
+
+    function approve(address spender, uint256 amount) external returns (bool) {
+        allowance[msg.sender][spender] = amount;
+        return true;
+    }
+
+    function _checkNonZero(uint256 amount) private pure {
+        if (amount == 0) revert("zero transfer");
+    }
+
+    function transfer(address to, uint256 amount) external returns (bool) {
+        _checkNonZero(amount);
+        balanceOf[msg.sender] -= amount;
+        balanceOf[to] += amount;
+        return true;
+    }
+
+    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+        _checkNonZero(amount);
+        allowance[from][msg.sender] -= amount;
+        balanceOf[from] -= amount;
+        balanceOf[to] += amount;
+        return true;
+    }
+}
+
+/// @dev Token that returns false on transfer but succeeds on transferFrom.
+///      Tests the release/refund path specifically — lock via transferFrom works,
+///      but the subsequent release/refund via transfer fails.
+contract ReleaseFalseReturningERC20 is IERC20 {
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+
+    function mint(address to, uint256 amount) external {
+        balanceOf[to] += amount;
+    }
+
+    function approve(address spender, uint256 amount) external returns (bool) {
+        allowance[msg.sender][spender] = amount;
+        return true;
+    }
+
+    function transfer(address, uint256) external returns (bool) {
+        return false; // Always reject on transfer (release/refund)
+    }
+
+    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+        allowance[from][msg.sender] -= amount;
+        balanceOf[from] -= amount;
+        balanceOf[to] += amount;
+        return true;
+    }
+}
+
 /// @dev Records the last outbound LayerZero send and can replay inbound messages
 ///      back into the escrow as if it were the canonical endpoint.
 contract MockEndpoint is ILayerZeroEndpoint {
@@ -1161,6 +1225,146 @@ contract PerihelionEscrowTest is Test {
         vm.prank(solver);
         vm.expectRevert(PerihelionEscrow.NotOwner.selector);
         escrow.cancelOwnershipTransfer();
+    }
+
+    // --- Weird ERC-20 test matrix: release/refund paths ----------------------
+    //
+    // The lock path is tested above with NoReturnERC20, FalseReturningERC20, and
+    // FeeERC20. Here we verify that the release and refund paths also handle
+    // these token shapes correctly.
+
+    function test_ReleaseWithNoReturnToken() public {
+        NoReturnERC20 noReturn = new NoReturnERC20();
+        noReturn.mint(user, 1_000_000);
+        vm.prank(user);
+        noReturn.approve(address(escrow), type(uint256).max);
+
+        PerihelionEscrow.Intent memory intent = _intent();
+        intent.sourceAsset = address(noReturn);
+        bytes memory sig = _sign(intent);
+        bytes32 h = escrow.hashIntent(intent);
+
+        vm.prank(solver);
+        escrow.lock{ value: 0.01 ether }(intent, sig);
+        assertEq(noReturn.balanceOf(address(escrow)), 100_000);
+
+        _confirm(h, solver, 1);
+        assertEq(noReturn.balanceOf(solver), 100_000);
+        assertEq(noReturn.balanceOf(address(escrow)), 0);
+    }
+
+    function test_RefundWithNoReturnToken() public {
+        NoReturnERC20 noReturn = new NoReturnERC20();
+        noReturn.mint(user, 1_000_000);
+        vm.prank(user);
+        noReturn.approve(address(escrow), type(uint256).max);
+
+        PerihelionEscrow.Intent memory intent = _intent();
+        intent.sourceAsset = address(noReturn);
+        bytes memory sig = _sign(intent);
+        bytes32 h = escrow.hashIntent(intent);
+
+        vm.prank(solver);
+        escrow.lock{ value: 0.01 ether }(intent, sig);
+
+        _cancel(h, 1);
+        assertEq(noReturn.balanceOf(user), 1_000_000);
+    }
+
+    function test_RevertWhen_ReleaseWithFalseReturningToken() public {
+        ReleaseFalseReturningERC20 falseToken = new ReleaseFalseReturningERC20();
+        falseToken.mint(user, 1_000_000);
+        vm.prank(user);
+        falseToken.approve(address(escrow), type(uint256).max);
+
+        PerihelionEscrow.Intent memory intent = _intent();
+        intent.sourceAsset = address(falseToken);
+        bytes memory sig = _sign(intent);
+        bytes32 h = escrow.hashIntent(intent);
+
+        vm.prank(solver);
+        escrow.lock{ value: 0.01 ether }(intent, sig);
+        assertEq(falseToken.balanceOf(address(escrow)), 100_000);
+
+        vm.expectRevert(PerihelionEscrow.TransferFailed.selector);
+        _confirm(h, solver, 1);
+    }
+
+    function test_RevertWhen_RefundWithFalseReturningToken() public {
+        ReleaseFalseReturningERC20 falseToken = new ReleaseFalseReturningERC20();
+        falseToken.mint(user, 1_000_000);
+        vm.prank(user);
+        falseToken.approve(address(escrow), type(uint256).max);
+
+        PerihelionEscrow.Intent memory intent = _intent();
+        intent.sourceAsset = address(falseToken);
+        bytes memory sig = _sign(intent);
+        bytes32 h = escrow.hashIntent(intent);
+
+        vm.prank(solver);
+        escrow.lock{ value: 0.01 ether }(intent, sig);
+
+        vm.expectRevert(PerihelionEscrow.TransferFailed.selector);
+        _cancel(h, 1);
+    }
+
+    function test_LockWithRevertOnZeroToken() public {
+        RevertOnZeroERC20 rzToken = new RevertOnZeroERC20();
+        rzToken.mint(user, 1_000_000);
+        vm.prank(user);
+        rzToken.approve(address(escrow), type(uint256).max);
+
+        PerihelionEscrow.Intent memory intent = _intent();
+        intent.sourceAsset = address(rzToken);
+        bytes memory sig = _sign(intent);
+        bytes32 h = escrow.hashIntent(intent);
+
+        vm.prank(solver);
+        escrow.lock{ value: 0.01 ether }(intent, sig);
+        assertEq(rzToken.balanceOf(address(escrow)), 100_000);
+        (,,, uint256 lAmount,,,) = escrow.locks(h);
+        assertEq(lAmount, 100_000);
+    }
+
+    function test_ReleaseWithRevertOnZeroToken() public {
+        RevertOnZeroERC20 rzToken = new RevertOnZeroERC20();
+        rzToken.mint(user, 1_000_000);
+        vm.prank(user);
+        rzToken.approve(address(escrow), type(uint256).max);
+
+        PerihelionEscrow.Intent memory intent = _intent();
+        intent.sourceAsset = address(rzToken);
+        bytes memory sig = _sign(intent);
+        bytes32 h = escrow.hashIntent(intent);
+
+        vm.prank(solver);
+        escrow.lock{ value: 0.01 ether }(intent, sig);
+
+        _confirm(h, solver, 1);
+        assertEq(rzToken.balanceOf(solver), 100_000);
+    }
+
+    /// @dev Fee-on-transfer applies on both lock and release transfers: the
+    ///      fee is taken from the transferred amount each time. With a 1% fee,
+    ///      locking 100_000 delivers 99_000 to the escrow, and releasing 99_000
+    ///      delivers 99_000 - 990 = 98_010 to the solver.
+    function test_ReleaseWithFeeOnTransferToken() public {
+        FeeERC20 feeToken = new FeeERC20(100); // 1% fee
+        feeToken.mint(user, 1_000_000);
+        vm.prank(user);
+        feeToken.approve(address(escrow), type(uint256).max);
+
+        PerihelionEscrow.Intent memory intent = _intent();
+        intent.sourceAsset = address(feeToken);
+        bytes memory sig = _sign(intent);
+        bytes32 h = escrow.hashIntent(intent);
+
+        vm.prank(solver);
+        escrow.lock{ value: 0.01 ether }(intent, sig);
+        assertEq(feeToken.balanceOf(address(escrow)), 99_000);
+
+        _confirm(h, solver, 1);
+        assertEq(feeToken.balanceOf(solver), 98_010);
     }
 
     // --- Nonce bitmap: out-of-order delivery --------------------------------
